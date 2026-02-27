@@ -1,0 +1,103 @@
+{
+  "name": "codeledger",
+  "displayName": "CodeLedger",
+  "description": "AI-powered decision log for your codebase — capture the why, not just the what.",
+  "version": "0.1.0",
+  "publisher": "codeledger",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/codeledger"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "keywords": ["documentation", "decisions", "ai", "knowledge", "gemini", "comments", "why"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeledger.showDecisions",
+        "title": "Show Decisions for Current File",
+        "category": "CodeLedger"
+      },
+      {
+        "command": "codeledger.setApiKey",
+        "title": "Set Gemini API Key",
+        "category": "CodeLedger"
+      },
+      {
+        "command": "codeledger.refresh",
+        "title": "Refresh",
+        "category": "CodeLedger",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "codeledger.viewDecision",
+        "title": "View Decision",
+        "category": "CodeLedger"
+      }
+    ],
+    "configuration": {
+      "title": "CodeLedger",
+      "properties": {
+        "codeledger.geminiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Google Gemini API key for AI-powered question generation.",
+          "markdownDescription": "Your Google Gemini API key. Get one free at https://ai.google.dev/"
+        },
+        "codeledger.minLinesChanged": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "description": "Minimum number of lines changed before CodeLedger considers asking a question."
+        },
+        "codeledger.cooldownMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "description": "Minimum minutes to wait between questions, to avoid interrupting your flow."
+        },
+        "codeledger.storageFolder": {
+          "type": "string",
+          "default": ".codeledger",
+          "description": "Folder name where decision logs are stored (relative to workspace root). Commit this folder with your code."
+        }
+      }
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "codeledger.decisionsView",
+          "name": "CodeLedger"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "codeledger.refresh",
+          "when": "view == codeledger.decisionsView",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0"
+  }
+}

@@ -49,6 +49,11 @@
         "command": "codeledger.viewDecision",
         "title": "View Decision",
         "category": "CodeLedger"
+      },
+      {
+        "command": "codeledger.testConnection",
+        "title": "Test Gemini Connection",
+        "category": "CodeLedger"
       }
     ],
     "configuration": {

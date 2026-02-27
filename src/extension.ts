@@ -6,7 +6,6 @@ import { DecisionStorage } from './decisionStorage';
 import { QuestionPanel } from './questionPanel';
 import { DecisionsProvider } from './sidebarProvider';
 
-// File extensions CodeLedger monitors
 const WATCHED_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
   '.py', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.hpp',
@@ -18,6 +17,14 @@ const WATCHED_EXTENSIONS = new Set([
 ]);
 
 export function activate(context: vscode.ExtensionContext) {
+  // Output channel — visible in View → Output → CodeLedger
+  const out = vscode.window.createOutputChannel('CodeLedger');
+  context.subscriptions.push(out);
+
+  function log(msg: string) {
+    out.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`);
+  }
+
   const diffTracker = new DiffTracker();
   const geminiClient = new GeminiClient();
 
@@ -25,6 +32,13 @@ export function activate(context: vscode.ExtensionContext) {
   let decisionsProvider: DecisionsProvider | null = null;
   let lastQuestionTime = 0;
   let isAsking = false;
+
+  // Status bar item shows current state
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusBar.text = '$(book) CodeLedger';
+  statusBar.tooltip = 'CodeLedger is active';
+  statusBar.show();
+  context.subscriptions.push(statusBar);
 
   function cfg() {
     return vscode.workspace.getConfiguration('codeledger');
@@ -37,38 +51,38 @@ export function activate(context: vscode.ExtensionContext) {
 
   function initStorage() {
     const root = getWorkspaceRoot();
-    if (!root) return;
+    if (!root) {
+      log('No workspace folder open — storage not initialized.');
+      return;
+    }
     const folderName = cfg().get<string>('storageFolder', '.codeledger');
     storage = new DecisionStorage(root, folderName);
+    log(`Storage initialized at ${root}/${folderName}`);
   }
 
   function initGemini() {
     const apiKey = cfg().get<string>('geminiApiKey', '').trim();
     if (apiKey) {
       geminiClient.initialize(apiKey);
+      log('Gemini client initialized.');
+    } else {
+      log('No Gemini API key set. Run "CodeLedger: Set Gemini API Key" from the command palette.');
     }
   }
 
-  // Boot
   initStorage();
   initGemini();
 
-  // Track content of all already-open documents
   vscode.workspace.textDocuments.forEach(doc => diffTracker.initialize(doc));
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument(doc => diffTracker.initialize(doc))
   );
 
-  // Register sidebar
   if (storage) {
     decisionsProvider = new DecisionsProvider(storage);
-    vscode.window.registerTreeDataProvider(
-      'codeledger.decisionsView',
-      decisionsProvider
-    );
+    vscode.window.registerTreeDataProvider('codeledger.decisionsView', decisionsProvider);
   }
 
-  // React to config changes (e.g. user sets API key via settings UI)
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(e => {
       if (e.affectsConfiguration('codeledger.geminiApiKey')) {
@@ -78,48 +92,79 @@ export function activate(context: vscode.ExtensionContext) {
         initStorage();
         if (storage && !decisionsProvider) {
           decisionsProvider = new DecisionsProvider(storage);
-          vscode.window.registerTreeDataProvider(
-            'codeledger.decisionsView',
-            decisionsProvider
-          );
+          vscode.window.registerTreeDataProvider('codeledger.decisionsView', decisionsProvider);
         }
       }
     })
   );
 
-  // ── Core: watch file saves ─────────────────────────────────────────────────
+  // ── Core: watch file saves ────────────────────────────────────────────────
+
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument(async document => {
-      if (!storage || isAsking) return;
+      const filename = path.basename(document.fileName);
+      log(`Save detected: ${filename}`);
 
-      // Only watch supported code file types
+      if (isAsking) {
+        log('Skipped — already showing a question.');
+        return;
+      }
+
+      if (!storage) {
+        log('Skipped — no workspace open.');
+        return;
+      }
+
       const ext = path.extname(document.fileName).toLowerCase();
-      if (!WATCHED_EXTENSIONS.has(ext)) return;
+      if (!WATCHED_EXTENSIONS.has(ext)) {
+        log(`Skipped — file type "${ext}" is not watched.`);
+        return;
+      }
 
-      // Never watch files inside the storage folder itself
       const folderName = cfg().get<string>('storageFolder', '.codeledger');
-      if (document.fileName.includes(`${path.sep}${folderName}${path.sep}`)) return;
+      if (document.fileName.includes(`${path.sep}${folderName}${path.sep}`)) {
+        log('Skipped — file is inside .codeledger folder.');
+        return;
+      }
 
-      // Respect cooldown to avoid interrupting flow
       const cooldownMs = cfg().get<number>('cooldownMinutes', 5) * 60 * 1000;
-      if (Date.now() - lastQuestionTime < cooldownMs) return;
+      const msSinceLastQuestion = Date.now() - lastQuestionTime;
+      if (lastQuestionTime > 0 && msSinceLastQuestion < cooldownMs) {
+        const remaining = Math.ceil((cooldownMs - msSinceLastQuestion) / 1000);
+        log(`Skipped — cooldown active (${remaining}s remaining).`);
+        return;
+      }
 
-      // Need an API key to proceed
-      if (!geminiClient.isInitialized()) return;
+      if (!geminiClient.isInitialized()) {
+        log('Skipped — Gemini API key not set.');
+        return;
+      }
 
-      // Compute what changed
       const diff = diffTracker.computeDiff(document);
       const minLines = cfg().get<number>('minLinesChanged', 3);
-      if (diff.totalChanged < minLines || !diff.diffText.trim()) return;
+      log(`Diff: ${diff.totalChanged} lines changed (threshold: ${minLines}).`);
+
+      if (diff.totalChanged < minLines || !diff.diffText.trim()) {
+        log('Skipped — not enough lines changed.');
+        return;
+      }
+
+      log(`Sending diff to Gemini...\n${diff.diffText}`);
+      statusBar.text = '$(sync~spin) CodeLedger: thinking...';
 
       isAsking = true;
       try {
-        const filename = path.basename(document.fileName);
         const question = await geminiClient.generateQuestion(filename, diff.diffText);
 
-        if (!question) return;
+        if (!question) {
+          log('Gemini returned SKIP — change was not interesting enough.');
+          statusBar.text = '$(book) CodeLedger';
+          return;
+        }
 
+        log(`Gemini question: ${question}`);
         lastQuestionTime = Date.now();
+        statusBar.text = '$(book) CodeLedger';
 
         const snippet = diff.addedLines.slice(0, 20).join('\n');
         const answer = await QuestionPanel.ask(question, filename, snippet);
@@ -127,17 +172,24 @@ export function activate(context: vscode.ExtensionContext) {
         if (answer && storage) {
           storage.saveDecision(document.fileName, question, answer, snippet);
           decisionsProvider?.refresh();
+          log('Decision saved.');
           vscode.window.setStatusBarMessage('$(check) CodeLedger: Decision logged', 4000);
+        } else {
+          log('Question was skipped by user.');
         }
-      } catch (err) {
-        console.error('CodeLedger error:', err);
+      } catch (err: any) {
+        statusBar.text = '$(book) CodeLedger';
+        const msg = err?.message ?? String(err);
+        log(`ERROR: ${msg}`);
+        vscode.window.showErrorMessage(`CodeLedger: Gemini error — ${msg}`);
       } finally {
         isAsking = false;
+        statusBar.text = '$(book) CodeLedger';
       }
     })
   );
 
-  // ── Commands ───────────────────────────────────────────────────────────────
+  // ── Commands ──────────────────────────────────────────────────────────────
 
   context.subscriptions.push(
     vscode.commands.registerCommand('codeledger.setApiKey', async () => {
@@ -150,13 +202,47 @@ export function activate(context: vscode.ExtensionContext) {
       });
 
       if (key?.trim()) {
-        await cfg().update(
-          'geminiApiKey',
-          key.trim(),
-          vscode.ConfigurationTarget.Global
-        );
+        await cfg().update('geminiApiKey', key.trim(), vscode.ConfigurationTarget.Global);
         geminiClient.initialize(key.trim());
+        log('API key updated.');
         vscode.window.showInformationMessage('CodeLedger: Gemini API key saved.');
+      }
+    })
+  );
+
+  // Test command — verifies Gemini is reachable and working
+  context.subscriptions.push(
+    vscode.commands.registerCommand('codeledger.testConnection', async () => {
+      if (!geminiClient.isInitialized()) {
+        vscode.window.showErrorMessage(
+          'CodeLedger: No API key set. Run "CodeLedger: Set Gemini API Key" first.'
+        );
+        return;
+      }
+
+      out.show();
+      log('Testing Gemini connection...');
+      statusBar.text = '$(sync~spin) CodeLedger: testing...';
+
+      try {
+        const question = await geminiClient.generateQuestion(
+          'authService.ts',
+          `+ const token = jwt.sign(payload, secret, { expiresIn: '15m' });\n+ const refreshToken = jwt.sign(payload, refreshSecret, { expiresIn: '7d' });`
+        );
+        statusBar.text = '$(book) CodeLedger';
+
+        if (question) {
+          log(`Connection OK. Sample question: "${question}"`);
+          vscode.window.showInformationMessage(`CodeLedger: Connected! Sample question: "${question}"`);
+        } else {
+          log('Connection OK but Gemini returned SKIP for the test diff.');
+          vscode.window.showWarningMessage('CodeLedger: Connected, but Gemini skipped the test. Try a larger code change.');
+        }
+      } catch (err: any) {
+        statusBar.text = '$(book) CodeLedger';
+        const msg = err?.message ?? String(err);
+        log(`Connection FAILED: ${msg}`);
+        vscode.window.showErrorMessage(`CodeLedger: Connection failed — ${msg}`);
       }
     })
   );
@@ -165,16 +251,12 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('codeledger.showDecisions', () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || !storage) {
-        vscode.window.showInformationMessage(
-          'CodeLedger: Open a file in a workspace to see its decisions.'
-        );
+        vscode.window.showInformationMessage('CodeLedger: Open a file in a workspace to see its decisions.');
         return;
       }
       const decisions = storage.getDecisions(editor.document.fileName);
       if (decisions.length === 0) {
-        vscode.window.showInformationMessage(
-          'CodeLedger: No decisions logged for this file yet.'
-        );
+        vscode.window.showInformationMessage('CodeLedger: No decisions logged for this file yet.');
         return;
       }
       vscode.commands.executeCommand('codeledger.decisionsView.focus');
@@ -188,21 +270,19 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand(
-      'codeledger.viewDecision',
-      (decision) => {
-        const panel = vscode.window.createWebviewPanel(
-          'codeledger.decisionView',
-          decision.question.slice(0, 50) + '…',
-          vscode.ViewColumn.Beside,
-          {}
-        );
-        panel.webview.html = buildDecisionViewHtml(decision);
-      }
-    )
+    vscode.commands.registerCommand('codeledger.viewDecision', decision => {
+      const panel = vscode.window.createWebviewPanel(
+        'codeledger.decisionView',
+        decision.question.slice(0, 50) + '…',
+        vscode.ViewColumn.Beside,
+        {}
+      );
+      panel.webview.html = buildDecisionViewHtml(decision);
+    })
   );
 
-  console.log('CodeLedger is active.');
+  log('CodeLedger is active. Watching for file saves...');
+  out.show(true); // Show output panel on activation so user can see logs
 }
 
 function buildDecisionViewHtml(decision: {
@@ -225,60 +305,24 @@ function buildDecisionViewHtml(decision: {
 <head>
   <meta charset="UTF-8">
   <style>
-    body {
-      font-family: var(--vscode-font-family);
-      font-size: var(--vscode-font-size);
-      color: var(--vscode-foreground);
-      background: var(--vscode-editor-background);
-      padding: 24px;
-      line-height: 1.6;
-    }
-    .label {
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      font-weight: 600;
-      color: var(--vscode-descriptionForeground);
-      margin-bottom: 4px;
-    }
+    body { font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); color: var(--vscode-foreground); background: var(--vscode-editor-background); padding: 24px; line-height: 1.6; }
+    .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
     .value { margin-bottom: 20px; font-size: 13px; }
     .meta { color: var(--vscode-descriptionForeground); font-size: 12px; }
-    .answer {
-      background: var(--vscode-editor-inactiveSelectionBackground);
-      border-left: 3px solid var(--vscode-textLink-foreground);
-      padding: 12px 14px;
-      border-radius: 4px;
-      white-space: pre-wrap;
-    }
-    pre {
-      background: var(--vscode-textBlockQuote-background);
-      border: 1px solid var(--vscode-panel-border);
-      padding: 10px 12px;
-      border-radius: 4px;
-      overflow-x: auto;
-      font-size: 12px;
-      font-family: var(--vscode-editor-font-family);
-      white-space: pre-wrap;
-    }
+    .answer { background: var(--vscode-editor-inactiveSelectionBackground); border-left: 3px solid var(--vscode-textLink-foreground); padding: 12px 14px; border-radius: 4px; white-space: pre-wrap; }
+    pre { background: var(--vscode-textBlockQuote-background); border: 1px solid var(--vscode-panel-border); padding: 10px 12px; border-radius: 4px; overflow-x: auto; font-size: 12px; font-family: var(--vscode-editor-font-family); white-space: pre-wrap; }
   </style>
 </head>
 <body>
   <div class="label">File</div>
   <div class="value meta">${esc(decision.filePath)}</div>
-
   <div class="label">Logged</div>
   <div class="value meta">${new Date(decision.timestamp).toLocaleString()}</div>
-
   <div class="label">Question</div>
   <div class="value">${esc(decision.question)}</div>
-
   <div class="label">Answer</div>
   <div class="value answer">${esc(decision.answer)}</div>
-
-  ${decision.codeSnippet ? `
-  <div class="label">Code Snippet</div>
-  <pre>${esc(decision.codeSnippet)}</pre>
-  ` : ''}
+  ${decision.codeSnippet ? `<div class="label">Code Snippet</div><pre>${esc(decision.codeSnippet)}</pre>` : ''}
 </body>
 </html>`;
 }

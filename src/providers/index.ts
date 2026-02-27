@@ -12,7 +12,7 @@ export const PROVIDER_LABELS: Record<ProviderName, string> = {
 };
 
 export const DEFAULT_MODELS: Record<ProviderName, string> = {
-  gemini: 'gemini-2.0-flash-latest',
+  gemini: 'gemini-flash-latest',
   openai: 'gpt-4o-mini',
   claude: 'claude-haiku-4-5-20251001',
 };

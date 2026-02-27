@@ -13,7 +13,7 @@ export class GeminiProvider implements LLMProvider {
 
   constructor(
     private apiKey: string,
-    private model: string = 'gemini-2.0-flash-latest'
+    private model: string = 'gemini-flash-latest'
   ) {}
 
   async generateQuestion(filename: string, diffText: string): Promise<string | null> {

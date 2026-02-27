@@ -16,8 +16,10 @@ const WATCHED_EXTENSIONS = new Set([
   '.yaml', '.yml', '.toml',
 ]);
 
+// How long after the user stops typing before we process the diff (ms)
+const DEBOUNCE_MS = 3000;
+
 export function activate(context: vscode.ExtensionContext) {
-  // Output channel — visible in View → Output → CodeLedger
   const out = vscode.window.createOutputChannel('CodeLedger');
   context.subscriptions.push(out);
 
@@ -33,7 +35,9 @@ export function activate(context: vscode.ExtensionContext) {
   let lastQuestionTime = 0;
   let isAsking = false;
 
-  // Status bar item shows current state
+  // Per-file debounce timers — fires after user stops typing for DEBOUNCE_MS
+  const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.text = '$(book) CodeLedger';
   statusBar.tooltip = 'CodeLedger is active';
@@ -66,13 +70,14 @@ export function activate(context: vscode.ExtensionContext) {
       geminiClient.initialize(apiKey);
       log('Gemini client initialized.');
     } else {
-      log('No Gemini API key set. Run "CodeLedger: Set Gemini API Key" from the command palette.');
+      log('No Gemini API key set. Run "CodeLedger: Set Gemini API Key".');
     }
   }
 
   initStorage();
   initGemini();
 
+  // Snapshot content of all open documents so we can diff later
   vscode.workspace.textDocuments.forEach(doc => diffTracker.initialize(doc));
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument(doc => diffTracker.initialize(doc))
@@ -98,93 +103,122 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // ── Core: watch file saves ────────────────────────────────────────────────
+  // ── Core logic ────────────────────────────────────────────────────────────
 
+  async function processDocument(document: vscode.TextDocument) {
+    const filename = path.basename(document.fileName);
+    log(`Processing: ${filename}`);
+
+    if (isAsking) {
+      log('Skipped — already showing a question.');
+      return;
+    }
+    if (!storage) {
+      log('Skipped — no workspace open.');
+      return;
+    }
+
+    const ext = path.extname(document.fileName).toLowerCase();
+    if (!WATCHED_EXTENSIONS.has(ext)) {
+      log(`Skipped — "${ext}" is not a watched file type.`);
+      return;
+    }
+
+    const folderName = cfg().get<string>('storageFolder', '.codeledger');
+    if (document.fileName.includes(`${path.sep}${folderName}${path.sep}`)) {
+      return;
+    }
+
+    const cooldownMs = cfg().get<number>('cooldownMinutes', 5) * 60 * 1000;
+    const msSinceLast = Date.now() - lastQuestionTime;
+    if (lastQuestionTime > 0 && msSinceLast < cooldownMs) {
+      const remaining = Math.ceil((cooldownMs - msSinceLast) / 1000);
+      log(`Skipped — cooldown active (${remaining}s remaining).`);
+      return;
+    }
+
+    if (!geminiClient.isInitialized()) {
+      log('Skipped — Gemini API key not set.');
+      return;
+    }
+
+    const diff = diffTracker.computeDiff(document);
+    const minLines = cfg().get<number>('minLinesChanged', 3);
+    log(`Diff: ${diff.totalChanged} lines changed (threshold: ${minLines}).`);
+
+    if (diff.totalChanged < minLines || !diff.diffText.trim()) {
+      log('Skipped — not enough lines changed.');
+      return;
+    }
+
+    log(`Sending to Gemini:\n${diff.diffText}`);
+    statusBar.text = '$(sync~spin) CodeLedger: thinking...';
+    isAsking = true;
+
+    try {
+      const question = await geminiClient.generateQuestion(filename, diff.diffText);
+
+      if (!question) {
+        log('Gemini returned SKIP — change not interesting enough.');
+        return;
+      }
+
+      log(`Question: ${question}`);
+      lastQuestionTime = Date.now();
+
+      const snippet = diff.addedLines.slice(0, 20).join('\n');
+      const answer = await QuestionPanel.ask(question, filename, snippet);
+
+      if (answer && storage) {
+        storage.saveDecision(document.fileName, question, answer, snippet);
+        decisionsProvider?.refresh();
+        log('Decision saved.');
+        vscode.window.setStatusBarMessage('$(check) CodeLedger: Decision logged', 4000);
+      } else {
+        log('Skipped by user.');
+      }
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      log(`ERROR: ${msg}`);
+      vscode.window.showErrorMessage(`CodeLedger: ${msg}`);
+    } finally {
+      isAsking = false;
+      statusBar.text = '$(book) CodeLedger';
+    }
+  }
+
+  function scheduleProcessing(document: vscode.TextDocument) {
+    const key = document.uri.fsPath;
+    const existing = debounceTimers.get(key);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      debounceTimers.delete(key);
+      processDocument(document);
+    }, DEBOUNCE_MS);
+    debounceTimers.set(key, timer);
+  }
+
+  // Primary trigger: fires on every keystroke, debounced per file.
+  // Works with Cursor auto-save, VS Code auto-save, and explicit Cmd+S.
   context.subscriptions.push(
-    vscode.workspace.onDidSaveTextDocument(async document => {
-      const filename = path.basename(document.fileName);
-      log(`Save detected: ${filename}`);
+    vscode.workspace.onDidChangeTextDocument(event => {
+      if (event.contentChanges.length === 0) return;
+      scheduleProcessing(event.document);
+    })
+  );
 
-      if (isAsking) {
-        log('Skipped — already showing a question.');
-        return;
-      }
-
-      if (!storage) {
-        log('Skipped — no workspace open.');
-        return;
-      }
-
-      const ext = path.extname(document.fileName).toLowerCase();
-      if (!WATCHED_EXTENSIONS.has(ext)) {
-        log(`Skipped — file type "${ext}" is not watched.`);
-        return;
-      }
-
-      const folderName = cfg().get<string>('storageFolder', '.codeledger');
-      if (document.fileName.includes(`${path.sep}${folderName}${path.sep}`)) {
-        log('Skipped — file is inside .codeledger folder.');
-        return;
-      }
-
-      const cooldownMs = cfg().get<number>('cooldownMinutes', 5) * 60 * 1000;
-      const msSinceLastQuestion = Date.now() - lastQuestionTime;
-      if (lastQuestionTime > 0 && msSinceLastQuestion < cooldownMs) {
-        const remaining = Math.ceil((cooldownMs - msSinceLastQuestion) / 1000);
-        log(`Skipped — cooldown active (${remaining}s remaining).`);
-        return;
-      }
-
-      if (!geminiClient.isInitialized()) {
-        log('Skipped — Gemini API key not set.');
-        return;
-      }
-
-      const diff = diffTracker.computeDiff(document);
-      const minLines = cfg().get<number>('minLinesChanged', 3);
-      log(`Diff: ${diff.totalChanged} lines changed (threshold: ${minLines}).`);
-
-      if (diff.totalChanged < minLines || !diff.diffText.trim()) {
-        log('Skipped — not enough lines changed.');
-        return;
-      }
-
-      log(`Sending diff to Gemini...\n${diff.diffText}`);
-      statusBar.text = '$(sync~spin) CodeLedger: thinking...';
-
-      isAsking = true;
-      try {
-        const question = await geminiClient.generateQuestion(filename, diff.diffText);
-
-        if (!question) {
-          log('Gemini returned SKIP — change was not interesting enough.');
-          statusBar.text = '$(book) CodeLedger';
-          return;
-        }
-
-        log(`Gemini question: ${question}`);
-        lastQuestionTime = Date.now();
-        statusBar.text = '$(book) CodeLedger';
-
-        const snippet = diff.addedLines.slice(0, 20).join('\n');
-        const answer = await QuestionPanel.ask(question, filename, snippet);
-
-        if (answer && storage) {
-          storage.saveDecision(document.fileName, question, answer, snippet);
-          decisionsProvider?.refresh();
-          log('Decision saved.');
-          vscode.window.setStatusBarMessage('$(check) CodeLedger: Decision logged', 4000);
-        } else {
-          log('Question was skipped by user.');
-        }
-      } catch (err: any) {
-        statusBar.text = '$(book) CodeLedger';
-        const msg = err?.message ?? String(err);
-        log(`ERROR: ${msg}`);
-        vscode.window.showErrorMessage(`CodeLedger: Gemini error — ${msg}`);
-      } finally {
-        isAsking = false;
-        statusBar.text = '$(book) CodeLedger';
+  // Secondary trigger: if user explicitly saves, fire immediately
+  // instead of waiting for the debounce timer.
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument(document => {
+      const key = document.uri.fsPath;
+      const existing = debounceTimers.get(key);
+      if (existing) {
+        clearTimeout(existing);
+        debounceTimers.delete(key);
+        processDocument(document);
       }
     })
   );
@@ -200,7 +234,6 @@ export function activate(context: vscode.ExtensionContext) {
         placeHolder: 'AIza...',
         validateInput: v => (!v?.trim() ? 'API key cannot be empty' : null),
       });
-
       if (key?.trim()) {
         await cfg().update('geminiApiKey', key.trim(), vscode.ConfigurationTarget.Global);
         geminiClient.initialize(key.trim());
@@ -210,33 +243,27 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Test command — verifies Gemini is reachable and working
   context.subscriptions.push(
     vscode.commands.registerCommand('codeledger.testConnection', async () => {
       if (!geminiClient.isInitialized()) {
-        vscode.window.showErrorMessage(
-          'CodeLedger: No API key set. Run "CodeLedger: Set Gemini API Key" first.'
-        );
+        vscode.window.showErrorMessage('CodeLedger: No API key set. Run "CodeLedger: Set Gemini API Key" first.');
         return;
       }
-
       out.show();
       log('Testing Gemini connection...');
       statusBar.text = '$(sync~spin) CodeLedger: testing...';
-
       try {
         const question = await geminiClient.generateQuestion(
           'authService.ts',
           `+ const token = jwt.sign(payload, secret, { expiresIn: '15m' });\n+ const refreshToken = jwt.sign(payload, refreshSecret, { expiresIn: '7d' });`
         );
         statusBar.text = '$(book) CodeLedger';
-
         if (question) {
           log(`Connection OK. Sample question: "${question}"`);
-          vscode.window.showInformationMessage(`CodeLedger: Connected! Sample question: "${question}"`);
+          vscode.window.showInformationMessage(`CodeLedger: Connected! Sample: "${question}"`);
         } else {
           log('Connection OK but Gemini returned SKIP for the test diff.');
-          vscode.window.showWarningMessage('CodeLedger: Connected, but Gemini skipped the test. Try a larger code change.');
+          vscode.window.showWarningMessage('CodeLedger: Connected, but Gemini skipped the test diff. Try a real change.');
         }
       } catch (err: any) {
         statusBar.text = '$(book) CodeLedger';
@@ -281,8 +308,8 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  log('CodeLedger is active. Watching for file saves...');
-  out.show(true); // Show output panel on activation so user can see logs
+  log('CodeLedger is active. Watching for changes (3s debounce)...');
+  out.show(true);
 }
 
 function buildDecisionViewHtml(decision: {
@@ -293,12 +320,7 @@ function buildDecisionViewHtml(decision: {
   codeSnippet?: string;
 }): string {
   const esc = (t: string) =>
-    t
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
+    t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -314,14 +336,10 @@ function buildDecisionViewHtml(decision: {
   </style>
 </head>
 <body>
-  <div class="label">File</div>
-  <div class="value meta">${esc(decision.filePath)}</div>
-  <div class="label">Logged</div>
-  <div class="value meta">${new Date(decision.timestamp).toLocaleString()}</div>
-  <div class="label">Question</div>
-  <div class="value">${esc(decision.question)}</div>
-  <div class="label">Answer</div>
-  <div class="value answer">${esc(decision.answer)}</div>
+  <div class="label">File</div><div class="value meta">${esc(decision.filePath)}</div>
+  <div class="label">Logged</div><div class="value meta">${new Date(decision.timestamp).toLocaleString()}</div>
+  <div class="label">Question</div><div class="value">${esc(decision.question)}</div>
+  <div class="label">Answer</div><div class="value answer">${esc(decision.answer)}</div>
   ${decision.codeSnippet ? `<div class="label">Code Snippet</div><pre>${esc(decision.codeSnippet)}</pre>` : ''}
 </body>
 </html>`;

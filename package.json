@@ -2,11 +2,11 @@
   "name": "codeledger",
   "displayName": "CodeLedger",
   "description": "AI-powered decision log for your codebase — capture the why, not just the what.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "codeledger",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/codeledger"
+    "url": "https://github.com/Yashraj19/CodeLedger"
   },
   "engines": {
     "vscode": "^1.85.0"
@@ -20,6 +20,8 @@
     "ai",
     "knowledge",
     "gemini",
+    "openai",
+    "claude",
     "comments",
     "why"
   ],
@@ -30,13 +32,23 @@
   "contributes": {
     "commands": [
       {
-        "command": "codeledger.showDecisions",
-        "title": "Show Decisions for Current File",
+        "command": "codeledger.selectProvider",
+        "title": "Select Provider",
         "category": "CodeLedger"
       },
       {
         "command": "codeledger.setApiKey",
-        "title": "Set Gemini API Key",
+        "title": "Set API Key",
+        "category": "CodeLedger"
+      },
+      {
+        "command": "codeledger.testConnection",
+        "title": "Test Connection",
+        "category": "CodeLedger"
+      },
+      {
+        "command": "codeledger.showDecisions",
+        "title": "Show Decisions for Current File",
         "category": "CodeLedger"
       },
       {
@@ -49,21 +61,41 @@
         "command": "codeledger.viewDecision",
         "title": "View Decision",
         "category": "CodeLedger"
-      },
-      {
-        "command": "codeledger.testConnection",
-        "title": "Test Gemini Connection",
-        "category": "CodeLedger"
       }
     ],
     "configuration": {
       "title": "CodeLedger",
       "properties": {
+        "codeledger.provider": {
+          "type": "string",
+          "enum": [
+            "gemini",
+            "openai",
+            "claude"
+          ],
+          "enumDescriptions": [
+            "Google Gemini (default: gemini-2.0-flash)",
+            "OpenAI (default: gpt-4o-mini)",
+            "Anthropic Claude (default: claude-haiku-4-5-20251001)"
+          ],
+          "default": "gemini",
+          "description": "Which LLM provider to use for generating questions."
+        },
+        "codeledger.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for the selected provider."
+        },
+        "codeledger.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model name override. Leave empty to use the default for your provider."
+        },
         "codeledger.geminiApiKey": {
           "type": "string",
           "default": "",
-          "description": "Google Gemini API key for AI-powered question generation.",
-          "markdownDescription": "Your Google Gemini API key. Get one free at https://ai.google.dev/"
+          "description": "(Legacy) Gemini API key. Use codeledger.apiKey instead.",
+          "deprecationMessage": "Use codeledger.apiKey instead."
         },
         "codeledger.minLinesChanged": {
           "type": "number",
@@ -80,7 +112,7 @@
         "codeledger.storageFolder": {
           "type": "string",
           "default": ".codeledger",
-          "description": "Folder name where decision logs are stored (relative to workspace root). Commit this folder with your code."
+          "description": "Folder name where decision logs are stored (relative to workspace root)."
         }
       }
     },
@@ -115,8 +147,5 @@
     "@vscode/vsce": "^2.22.0",
     "esbuild": "^0.27.3",
     "typescript": "^5.3.0"
-  },
-  "dependencies": {
-    "@google/generative-ai": "^0.21.0"
   }
 }

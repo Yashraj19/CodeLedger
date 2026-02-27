@@ -15,6 +15,14 @@ interface DecisionFile {
   decisions: Decision[];
 }
 
+function safeReadJson<T>(filePath: string, fallback: T): T {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
 export class DecisionStorage {
   private storageFolder: string;
 
@@ -27,25 +35,28 @@ export class DecisionStorage {
 
   private ensureStorageFolder(): void {
     if (!fs.existsSync(this.storageFolder)) {
-      fs.mkdirSync(this.storageFolder, { recursive: true });
-      fs.writeFileSync(
-        path.join(this.storageFolder, 'README.md'),
-        [
-          '# CodeLedger — Decision Log',
-          '',
-          'This folder contains decision logs captured by the [CodeLedger](https://github.com/yourusername/codeledger) VS Code extension.',
-          '',
-          '**Commit this folder with your code** so that the reasoning behind technical decisions travels with the codebase.',
-          '',
-          'Each `.json` file corresponds to a source file and contains questions and answers logged during development.',
-        ].join('\n')
-      );
+      try {
+        fs.mkdirSync(this.storageFolder, { recursive: true });
+        fs.writeFileSync(
+          path.join(this.storageFolder, 'README.md'),
+          [
+            '# CodeLedger — Decision Log',
+            '',
+            'This folder contains decision logs captured by the [CodeLedger](https://github.com/Yashraj19/CodeLedger) VS Code extension.',
+            '',
+            '**Commit this folder with your code** so the reasoning behind technical decisions travels with the codebase.',
+            '',
+            'Each `.json` file corresponds to a source file and contains questions and answers logged during development.',
+          ].join('\n')
+        );
+      } catch (err: any) {
+        throw new Error(`Failed to create .codeledger folder: ${err.message}`);
+      }
     }
   }
 
   private getStoragePath(filePath: string): string {
     const relative = path.relative(this.workspaceRoot, filePath);
-    // Convert path separators and special chars to safe filename
     const safeName = relative
       .replace(/[/\\]/g, '__')
       .replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -61,16 +72,13 @@ export class DecisionStorage {
     this.ensureStorageFolder();
 
     const storagePath = this.getStoragePath(filePath);
-    let decisionFile: DecisionFile;
-
-    if (fs.existsSync(storagePath)) {
-      decisionFile = JSON.parse(fs.readFileSync(storagePath, 'utf8'));
-    } else {
-      decisionFile = {
-        file: path.relative(this.workspaceRoot, filePath),
-        decisions: [],
-      };
-    }
+    const fallback: DecisionFile = {
+      file: path.relative(this.workspaceRoot, filePath),
+      decisions: [],
+    };
+    const decisionFile = fs.existsSync(storagePath)
+      ? safeReadJson<DecisionFile>(storagePath, fallback)
+      : fallback;
 
     const decision: Decision = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -82,7 +90,12 @@ export class DecisionStorage {
     };
 
     decisionFile.decisions.push(decision);
-    fs.writeFileSync(storagePath, JSON.stringify(decisionFile, null, 2));
+
+    try {
+      fs.writeFileSync(storagePath, JSON.stringify(decisionFile, null, 2));
+    } catch (err: any) {
+      throw new Error(`Failed to save decision: ${err.message}`);
+    }
 
     return decision;
   }
@@ -92,10 +105,8 @@ export class DecisionStorage {
     if (!fs.existsSync(storagePath)) {
       return [];
     }
-    const decisionFile: DecisionFile = JSON.parse(
-      fs.readFileSync(storagePath, 'utf8')
-    );
-    return decisionFile.decisions;
+    const fallback: DecisionFile = { file: '', decisions: [] };
+    return safeReadJson<DecisionFile>(storagePath, fallback).decisions;
   }
 
   getAllDecisions(): { filePath: string; decisions: Decision[] }[] {
@@ -107,8 +118,10 @@ export class DecisionStorage {
       .readdirSync(this.storageFolder)
       .filter(f => f.endsWith('.json'))
       .map(f => {
-        const content: DecisionFile = JSON.parse(
-          fs.readFileSync(path.join(this.storageFolder, f), 'utf8')
+        const fallback: DecisionFile = { file: f, decisions: [] };
+        const content = safeReadJson<DecisionFile>(
+          path.join(this.storageFolder, f),
+          fallback
         );
         return { filePath: content.file, decisions: content.decisions };
       })

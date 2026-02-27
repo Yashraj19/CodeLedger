@@ -1,7 +1,13 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { DiffTracker } from './diffTracker';
-import { GeminiClient } from './geminiClient';
+import {
+  createProvider,
+  LLMProvider,
+  ProviderName,
+  PROVIDER_LABELS,
+  DEFAULT_MODELS,
+} from './providers';
 import { DecisionStorage } from './decisionStorage';
 import { QuestionPanel } from './questionPanel';
 import { DecisionsProvider } from './sidebarProvider';
@@ -16,7 +22,6 @@ const WATCHED_EXTENSIONS = new Set([
   '.yaml', '.yml', '.toml',
 ]);
 
-// How long after the user stops typing before we process the diff (ms)
 const DEBOUNCE_MS = 3000;
 
 export function activate(context: vscode.ExtensionContext) {
@@ -28,14 +33,11 @@ export function activate(context: vscode.ExtensionContext) {
   }
 
   const diffTracker = new DiffTracker();
-  const geminiClient = new GeminiClient();
-
+  let provider: LLMProvider | null = null;
   let storage: DecisionStorage | null = null;
   let decisionsProvider: DecisionsProvider | null = null;
   let lastQuestionTime = 0;
   let isAsking = false;
-
-  // Per-file debounce timers — fires after user stops typing for DEBOUNCE_MS
   const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -61,37 +63,81 @@ export function activate(context: vscode.ExtensionContext) {
     }
     const folderName = cfg().get<string>('storageFolder', '.codeledger');
     storage = new DecisionStorage(root, folderName);
-    log(`Storage initialized at ${root}/${folderName}`);
+    log(`Storage: ${root}/${folderName}`);
   }
 
-  function initGemini() {
-    const apiKey = cfg().get<string>('geminiApiKey', '').trim();
-    if (apiKey) {
-      geminiClient.initialize(apiKey);
-      log('Gemini client initialized.');
-    } else {
-      log('No Gemini API key set. Run "CodeLedger: Set Gemini API Key".');
+  function initProvider() {
+    const providerName = cfg().get<string>('provider', 'gemini') as ProviderName;
+
+    // Try unified apiKey first, fall back to legacy geminiApiKey
+    let apiKey = cfg().get<string>('apiKey', '').trim();
+    if (!apiKey) {
+      const legacyKey = cfg().get<string>('geminiApiKey', '').trim();
+      if (legacyKey && providerName === 'gemini') {
+        apiKey = legacyKey;
+      }
+    }
+
+    if (!apiKey) {
+      provider = null;
+      log(`No API key set for ${PROVIDER_LABELS[providerName]}. Run "CodeLedger: Set API Key".`);
+      statusBar.text = '$(book) CodeLedger (no key)';
+      return;
+    }
+
+    const modelOverride = cfg().get<string>('model', '').trim() || undefined;
+
+    try {
+      provider = createProvider(providerName, apiKey, modelOverride);
+      const model = modelOverride || DEFAULT_MODELS[providerName];
+      log(`Provider: ${PROVIDER_LABELS[providerName]} (${model})`);
+      statusBar.text = '$(book) CodeLedger';
+      statusBar.tooltip = `CodeLedger — ${PROVIDER_LABELS[providerName]}`;
+    } catch (err: any) {
+      provider = null;
+      log(`Failed to initialize provider: ${err.message}`);
+      statusBar.text = '$(book) CodeLedger (error)';
     }
   }
 
   initStorage();
-  initGemini();
+  initProvider();
 
-  // Snapshot content of all open documents so we can diff later
+  // Snapshot open docs for diffing
   vscode.workspace.textDocuments.forEach(doc => diffTracker.initialize(doc));
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument(doc => diffTracker.initialize(doc))
   );
 
+  // Clean up when files are closed (prevents memory leak)
+  context.subscriptions.push(
+    vscode.workspace.onDidCloseTextDocument(doc => {
+      const key = doc.uri.fsPath;
+      diffTracker.clearFile(key);
+      const timer = debounceTimers.get(key);
+      if (timer) {
+        clearTimeout(timer);
+        debounceTimers.delete(key);
+      }
+    })
+  );
+
+  // Sidebar
   if (storage) {
     decisionsProvider = new DecisionsProvider(storage);
     vscode.window.registerTreeDataProvider('codeledger.decisionsView', decisionsProvider);
   }
 
+  // React to config changes
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(e => {
-      if (e.affectsConfiguration('codeledger.geminiApiKey')) {
-        initGemini();
+      if (
+        e.affectsConfiguration('codeledger.provider') ||
+        e.affectsConfiguration('codeledger.apiKey') ||
+        e.affectsConfiguration('codeledger.geminiApiKey') ||
+        e.affectsConfiguration('codeledger.model')
+      ) {
+        initProvider();
       }
       if (e.affectsConfiguration('codeledger.storageFolder')) {
         initStorage();
@@ -133,12 +179,12 @@ export function activate(context: vscode.ExtensionContext) {
     const msSinceLast = Date.now() - lastQuestionTime;
     if (lastQuestionTime > 0 && msSinceLast < cooldownMs) {
       const remaining = Math.ceil((cooldownMs - msSinceLast) / 1000);
-      log(`Skipped — cooldown active (${remaining}s remaining).`);
+      log(`Skipped — cooldown (${remaining}s remaining).`);
       return;
     }
 
-    if (!geminiClient.isInitialized()) {
-      log('Skipped — Gemini API key not set.');
+    if (!provider) {
+      log('Skipped — no LLM provider configured.');
       return;
     }
 
@@ -151,15 +197,15 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    log(`Sending to Gemini:\n${diff.diffText}`);
-    statusBar.text = '$(sync~spin) CodeLedger: thinking...';
+    log(`Sending to ${provider.name}:\n${diff.diffText}`);
+    statusBar.text = `$(sync~spin) CodeLedger: asking ${provider.name}...`;
     isAsking = true;
 
     try {
-      const question = await geminiClient.generateQuestion(filename, diff.diffText);
+      const question = await provider.generateQuestion(filename, diff.diffText);
 
       if (!question) {
-        log('Gemini returned SKIP — change not interesting enough.');
+        log('LLM returned SKIP — change not interesting enough.');
         return;
       }
 
@@ -190,29 +236,26 @@ export function activate(context: vscode.ExtensionContext) {
   function scheduleProcessing(document: vscode.TextDocument) {
     const key = document.uri.fsPath;
     const existing = debounceTimers.get(key);
-    if (existing) {
-      clearTimeout(existing);
-    }
-    const timer = setTimeout(() => {
-      debounceTimers.delete(key);
-      processDocument(document);
-    }, DEBOUNCE_MS);
-    debounceTimers.set(key, timer);
+    if (existing) clearTimeout(existing);
+    debounceTimers.set(
+      key,
+      setTimeout(() => {
+        debounceTimers.delete(key);
+        processDocument(document);
+      }, DEBOUNCE_MS)
+    );
   }
 
-  // Primary trigger: fires on every keystroke, debounced per file.
-  // Works with Cursor auto-save, VS Code auto-save, and explicit Cmd+S.
+  // Watch keystrokes (debounced) — works with Cursor auto-save
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument(event => {
       if (event.contentChanges.length === 0) return;
-      // Only process real files on disk — ignore output panels, git diffs, etc.
       if (event.document.uri.scheme !== 'file') return;
       scheduleProcessing(event.document);
     })
   );
 
-  // Secondary trigger: if user explicitly saves, fire immediately
-  // instead of waiting for the debounce timer.
+  // On explicit save, fire immediately
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument(document => {
       const key = document.uri.fsPath;
@@ -228,50 +271,81 @@ export function activate(context: vscode.ExtensionContext) {
   // ── Commands ──────────────────────────────────────────────────────────────
 
   context.subscriptions.push(
+    vscode.commands.registerCommand('codeledger.selectProvider', async () => {
+      const items = Object.entries(PROVIDER_LABELS).map(([key, label]) => ({
+        label,
+        description: `Default model: ${DEFAULT_MODELS[key as ProviderName]}`,
+        providerKey: key,
+      }));
+
+      const picked = await vscode.window.showQuickPick(items, {
+        title: 'CodeLedger: Select LLM Provider',
+        placeHolder: 'Choose which AI provider to use',
+      });
+
+      if (picked) {
+        await cfg().update('provider', picked.providerKey, vscode.ConfigurationTarget.Global);
+        log(`Provider set to ${picked.label}.`);
+        vscode.window.showInformationMessage(`CodeLedger: Provider set to ${picked.label}.`);
+      }
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('codeledger.setApiKey', async () => {
+      const providerName = cfg().get<string>('provider', 'gemini') as ProviderName;
+      const label = PROVIDER_LABELS[providerName] ?? providerName;
+
       const key = await vscode.window.showInputBox({
-        title: 'CodeLedger: Set Gemini API Key',
-        prompt: 'Enter your Google Gemini API key (stored in VS Code settings)',
+        title: `CodeLedger: Set ${label} API Key`,
+        prompt: `Enter your ${label} API key (stored in VS Code settings)`,
         password: true,
-        placeHolder: 'AIza...',
+        placeHolder: 'Paste your API key here...',
         validateInput: v => (!v?.trim() ? 'API key cannot be empty' : null),
       });
+
       if (key?.trim()) {
-        await cfg().update('geminiApiKey', key.trim(), vscode.ConfigurationTarget.Global);
-        geminiClient.initialize(key.trim());
+        await cfg().update('apiKey', key.trim(), vscode.ConfigurationTarget.Global);
+        initProvider();
         log('API key updated.');
-        vscode.window.showInformationMessage('CodeLedger: Gemini API key saved.');
+        vscode.window.showInformationMessage(`CodeLedger: ${label} API key saved.`);
       }
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('codeledger.testConnection', async () => {
-      if (!geminiClient.isInitialized()) {
-        vscode.window.showErrorMessage('CodeLedger: No API key set. Run "CodeLedger: Set Gemini API Key" first.');
+      if (!provider) {
+        vscode.window.showErrorMessage(
+          'CodeLedger: No provider configured. Run "CodeLedger: Select Provider" and "CodeLedger: Set API Key".'
+        );
         return;
       }
       out.show();
-      log('Testing Gemini connection...');
-      statusBar.text = '$(sync~spin) CodeLedger: testing...';
+      log(`Testing ${provider.name} connection...`);
+      statusBar.text = `$(sync~spin) CodeLedger: testing ${provider.name}...`;
       try {
-        const question = await geminiClient.generateQuestion(
+        const question = await provider.generateQuestion(
           'authService.ts',
-          `+ const token = jwt.sign(payload, secret, { expiresIn: '15m' });\n+ const refreshToken = jwt.sign(payload, refreshSecret, { expiresIn: '7d' });`
+          [
+            '+ const token = jwt.sign(payload, secret, { expiresIn: "15m" });',
+            '+ const refreshToken = jwt.sign(payload, refreshSecret, { expiresIn: "7d" });',
+            '- const token = jwt.sign(payload, secret);',
+          ].join('\n')
         );
         statusBar.text = '$(book) CodeLedger';
         if (question) {
-          log(`Connection OK. Sample question: "${question}"`);
-          vscode.window.showInformationMessage(`CodeLedger: Connected! Sample: "${question}"`);
+          log(`Connection OK. Sample: "${question}"`);
+          vscode.window.showInformationMessage(`CodeLedger: ${provider.name} connected! "${question}"`);
         } else {
-          log('Connection OK but Gemini returned SKIP for the test diff.');
-          vscode.window.showWarningMessage('CodeLedger: Connected, but Gemini skipped the test diff. Try a real change.');
+          log('Connection OK but LLM returned SKIP.');
+          vscode.window.showInformationMessage(`CodeLedger: ${provider.name} connected (returned SKIP for test).`);
         }
       } catch (err: any) {
         statusBar.text = '$(book) CodeLedger';
         const msg = err?.message ?? String(err);
         log(`Connection FAILED: ${msg}`);
-        vscode.window.showErrorMessage(`CodeLedger: Connection failed — ${msg}`);
+        vscode.window.showErrorMessage(`CodeLedger: ${provider.name} failed — ${msg}`);
       }
     })
   );
@@ -300,9 +374,13 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('codeledger.viewDecision', decision => {
+      const title =
+        decision.question.length > 50
+          ? decision.question.slice(0, 47) + '...'
+          : decision.question;
       const panel = vscode.window.createWebviewPanel(
         'codeledger.decisionView',
-        decision.question.slice(0, 50) + '…',
+        title,
         vscode.ViewColumn.Beside,
         {}
       );
@@ -322,7 +400,12 @@ function buildDecisionViewHtml(decision: {
   codeSnippet?: string;
 }): string {
   const esc = (t: string) =>
-    t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    t
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
 
   return `<!DOCTYPE html>
 <html lang="en">

@@ -1,6 +1,9 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+export interface LLMProvider {
+  readonly name: string;
+  generateQuestion(filename: string, diffText: string): Promise<string | null>;
+}
 
-const SYSTEM_PROMPT = `You are a code documentation assistant embedded in a developer's IDE.
+export const SYSTEM_PROMPT = `You are a code documentation assistant embedded in a developer's IDE.
 Your job is to analyze code changes and ask the developer ONE insightful question about a meaningful technical decision they made.
 
 Focus on decisions worth documenting:
@@ -17,50 +20,34 @@ DO NOT ask about:
 - Adding an import for an already-decided dependency
 - Obvious, self-explanatory code (simple getters, console.log, basic assignments)
 - Trivial formatting or whitespace changes
+- Changes where the developer already wrote comments explaining the reasoning
 
 If the change contains a meaningful decision, respond with ONLY the question. No preamble, no "Question:" prefix — just the question itself.
 If the change is trivial and not worth asking about, respond with exactly: SKIP`;
 
-export class GeminiClient {
-  private genAI: GoogleGenerativeAI | null = null;
-
-  initialize(apiKey: string): void {
-    this.genAI = new GoogleGenerativeAI(apiKey);
-  }
-
-  isInitialized(): boolean {
-    return this.genAI !== null;
-  }
-
-  async generateQuestion(filename: string, diffText: string): Promise<string | null> {
-    if (!this.genAI) {
-      return null;
-    }
-
-    const model = this.genAI.getGenerativeModel({
-      model: 'gemini-2.0-flash',
-      systemInstruction: SYSTEM_PROMPT,
-    });
-
-    const prompt = `File: ${filename}
+export function buildUserPrompt(filename: string, diffText: string): string {
+  return `File: ${filename}
 
 Code changes (+ added, - removed):
 ${diffText}
 
 Ask ONE specific question about the most interesting technical decision in this change, or respond with SKIP if the change is trivial.`;
+}
 
-    try {
-      const result = await model.generateContent(prompt);
-      const text = result.response.text().trim();
-
-      if (text.toUpperCase() === 'SKIP' || text === '') {
-        return null;
-      }
-
-      return text;
-    } catch (error) {
-      console.error('CodeLedger: Gemini API error:', error);
-      return null;
-    }
+export function parseResponse(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.toUpperCase() === 'SKIP') {
+    return null;
   }
+  return trimmed;
+}
+
+const TIMEOUT_MS = 15000;
+
+export function fetchWithTimeout(url: string, options: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() =>
+    clearTimeout(timer)
+  );
 }

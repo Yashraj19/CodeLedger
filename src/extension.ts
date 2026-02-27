@@ -205,6 +205,8 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument(event => {
       if (event.contentChanges.length === 0) return;
+      // Only process real files on disk — ignore output panels, git diffs, etc.
+      if (event.document.uri.scheme !== 'file') return;
       scheduleProcessing(event.document);
     })
   );

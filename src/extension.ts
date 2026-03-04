@@ -11,6 +11,8 @@ import {
 import { DecisionStorage } from './decisionStorage';
 import { QuestionPanel } from './questionPanel';
 import { DecisionsProvider } from './sidebarProvider';
+import { DecorationsManager } from './decorationsManager';
+import { toErrorMessage } from './utils';
 
 const WATCHED_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
@@ -36,6 +38,7 @@ export function activate(context: vscode.ExtensionContext) {
   let provider: LLMProvider | null = null;
   let storage: DecisionStorage | null = null;
   let decisionsProvider: DecisionsProvider | null = null;
+  let decorationsManager: DecorationsManager | null = null;
   let lastQuestionTime = 0;
   let isAsking = false;
   const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -43,6 +46,7 @@ export function activate(context: vscode.ExtensionContext) {
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.text = '$(book) CodeLedger';
   statusBar.tooltip = 'CodeLedger is active';
+  statusBar.command = 'codeledger.searchDecisions';
   statusBar.show();
   context.subscriptions.push(statusBar);
 
@@ -53,6 +57,15 @@ export function activate(context: vscode.ExtensionContext) {
   function getWorkspaceRoot(): string | null {
     const folders = vscode.workspace.workspaceFolders;
     return folders && folders.length > 0 ? folders[0].uri.fsPath : null;
+  }
+
+  function normalStatusBar(): void {
+    if (!provider) { return; }
+    const total = storage
+      ? storage.getAllDecisions().reduce((sum, e) => sum + e.decisions.length, 0)
+      : 0;
+    statusBar.text = total > 0 ? `$(book) CodeLedger (${total})` : '$(book) CodeLedger';
+    statusBar.tooltip = `CodeLedger — ${provider.name} · ${total} decision${total !== 1 ? 's' : ''} logged\nClick to search decisions`;
   }
 
   function initStorage() {
@@ -91,11 +104,10 @@ export function activate(context: vscode.ExtensionContext) {
       provider = createProvider(providerName, apiKey, modelOverride);
       const model = modelOverride || DEFAULT_MODELS[providerName];
       log(`Provider: ${PROVIDER_LABELS[providerName]} (${model})`);
-      statusBar.text = '$(book) CodeLedger';
-      statusBar.tooltip = `CodeLedger — ${PROVIDER_LABELS[providerName]}`;
-    } catch (err: any) {
+      normalStatusBar();
+    } catch (err: unknown) {
       provider = null;
-      log(`Failed to initialize provider: ${err.message}`);
+      log(`Failed to initialize provider: ${toErrorMessage(err)}`);
       statusBar.text = '$(book) CodeLedger (error)';
     }
   }
@@ -122,11 +134,29 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Sidebar
+  // Sidebar + decorations (both require storage)
   if (storage) {
     decisionsProvider = new DecisionsProvider(storage);
     vscode.window.registerTreeDataProvider('codeledger.decisionsView', decisionsProvider);
+
+    const dm = new DecorationsManager(storage);
+    decorationsManager = dm;
+    context.subscriptions.push(dm);
+
+    // Decorate the active editor on startup
+    if (vscode.window.activeTextEditor) {
+      dm.updateEditor(vscode.window.activeTextEditor);
+    }
   }
+
+  // Refresh decorations whenever the active editor changes
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(editor => {
+      if (editor) {
+        decorationsManager?.updateEditor(editor);
+      }
+    })
+  );
 
   // React to config changes
   context.subscriptions.push(
@@ -218,25 +248,33 @@ export function activate(context: vscode.ExtensionContext) {
       if (answer && storage) {
         storage.saveDecision(document.fileName, question, answer, snippet);
         decisionsProvider?.refresh();
+        normalStatusBar();
+
+        // Refresh decorations for the file just saved
+        const activeEditor = vscode.window.activeTextEditor;
+        if (activeEditor && activeEditor.document.fileName === document.fileName) {
+          decorationsManager?.updateEditor(activeEditor);
+        }
+
         log('Decision saved.');
         vscode.window.setStatusBarMessage('$(check) CodeLedger: Decision logged', 4000);
       } else {
         log('Skipped by user.');
       }
-    } catch (err: any) {
-      const msg = err?.message ?? String(err);
+    } catch (err: unknown) {
+      const msg = toErrorMessage(err);
       log(`ERROR: ${msg}`);
       vscode.window.showErrorMessage(`CodeLedger: ${msg}`);
     } finally {
       isAsking = false;
-      statusBar.text = '$(book) CodeLedger';
+      normalStatusBar();
     }
   }
 
   function scheduleProcessing(document: vscode.TextDocument) {
     const key = document.uri.fsPath;
     const existing = debounceTimers.get(key);
-    if (existing) clearTimeout(existing);
+    if (existing) { clearTimeout(existing); }
     debounceTimers.set(
       key,
       setTimeout(() => {
@@ -249,8 +287,8 @@ export function activate(context: vscode.ExtensionContext) {
   // Watch keystrokes (debounced) — works with Cursor auto-save
   context.subscriptions.push(
     vscode.workspace.onDidChangeTextDocument(event => {
-      if (event.contentChanges.length === 0) return;
-      if (event.document.uri.scheme !== 'file') return;
+      if (event.contentChanges.length === 0) { return; }
+      if (event.document.uri.scheme !== 'file') { return; }
       scheduleProcessing(event.document);
     })
   );
@@ -333,7 +371,7 @@ export function activate(context: vscode.ExtensionContext) {
             '- const token = jwt.sign(payload, secret);',
           ].join('\n')
         );
-        statusBar.text = '$(book) CodeLedger';
+        normalStatusBar();
         if (question) {
           log(`Connection OK. Sample: "${question}"`);
           vscode.window.showInformationMessage(`CodeLedger: ${provider.name} connected! "${question}"`);
@@ -341,9 +379,9 @@ export function activate(context: vscode.ExtensionContext) {
           log('Connection OK but LLM returned SKIP.');
           vscode.window.showInformationMessage(`CodeLedger: ${provider.name} connected (returned SKIP for test).`);
         }
-      } catch (err: any) {
-        statusBar.text = '$(book) CodeLedger';
-        const msg = err?.message ?? String(err);
+      } catch (err: unknown) {
+        normalStatusBar();
+        const msg = toErrorMessage(err);
         log(`Connection FAILED: ${msg}`);
         vscode.window.showErrorMessage(`CodeLedger: ${provider.name} failed — ${msg}`);
       }
@@ -369,6 +407,11 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('codeledger.refresh', () => {
       decisionsProvider?.refresh();
+      const activeEditor = vscode.window.activeTextEditor;
+      if (activeEditor) {
+        decorationsManager?.updateEditor(activeEditor);
+      }
+      normalStatusBar();
     })
   );
 
@@ -385,6 +428,41 @@ export function activate(context: vscode.ExtensionContext) {
         {}
       );
       panel.webview.html = buildDecisionViewHtml(decision);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('codeledger.searchDecisions', async () => {
+      if (!storage) {
+        vscode.window.showInformationMessage('CodeLedger: No workspace open.');
+        return;
+      }
+
+      const allDecisions = storage.getAllDecisions();
+      if (allDecisions.length === 0) {
+        vscode.window.showInformationMessage('CodeLedger: No decisions logged yet. Start coding!');
+        return;
+      }
+
+      const items = allDecisions.flatMap(({ filePath, decisions }) =>
+        decisions.map(d => ({
+          label: d.question.length > 80 ? d.question.slice(0, 77) + '...' : d.question,
+          description: filePath,
+          detail: d.answer,
+          decision: d,
+        }))
+      );
+
+      const picked = await vscode.window.showQuickPick(items, {
+        title: 'CodeLedger: Search Decisions',
+        placeHolder: 'Search questions and answers...',
+        matchOnDescription: true,
+        matchOnDetail: true,
+      });
+
+      if (picked) {
+        vscode.commands.executeCommand('codeledger.viewDecision', picked.decision);
+      }
     })
   );
 

@@ -62,6 +62,11 @@
         "command": "codeledger.viewDecision",
         "title": "View Decision",
         "category": "CodeLedger"
+      },
+      {
+        "command": "codeledger.searchDecisions",
+        "title": "Search Decisions",
+        "category": "CodeLedger"
       }
     ],
     "configuration": {

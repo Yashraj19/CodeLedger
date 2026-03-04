@@ -2,7 +2,7 @@
   "name": "code-ledger",
   "displayName": "CodeLedger",
   "description": "AI-powered decision log for your codebase — capture the why, not just the what.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "yashraj19",
   "repository": {
     "type": "git",

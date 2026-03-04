@@ -3,6 +3,13 @@ src/**
 node_modules/**
 *.ts
 tsconfig.json
+vitest.config.ts
 .gitignore
 package-lock.json
+CLAUDE.md
+coverage/**
+out/__mocks__/**
+out/test/**
+out/providers/apiTypes.js
+out/utils.js
 Gemini_Generated_Image_*.png

@@ -434,6 +434,43 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand('codeledger.setCooldown', async () => {
+      const current = cfg().get<number>('cooldownMinutes', 5);
+      const presets = [1, 5, 10, 30].map(m => ({
+        label: `${m} minute${m === 1 ? '' : 's'}`,
+        description: m === current ? '(current)' : undefined,
+        value: m,
+      }));
+
+      const picked = await vscode.window.showQuickPick(
+        [...presets, { label: 'Custom...', description: undefined, value: -1 }],
+        { title: 'CodeLedger: Set Cooldown Per File', placeHolder: `Current: ${current} min` }
+      );
+
+      if (!picked) { return; }
+
+      let minutes = picked.value;
+      if (minutes === -1) {
+        const input = await vscode.window.showInputBox({
+          title: 'CodeLedger: Custom Cooldown',
+          prompt: 'Minutes between questions per file (minimum 1)',
+          value: String(current),
+          validateInput: v => {
+            const n = Number(v);
+            return (!v || isNaN(n) || n < 1) ? 'Enter a number ≥ 1' : null;
+          },
+        });
+        if (!input) { return; }
+        minutes = Math.max(1, Number(input));
+      }
+
+      await cfg().update('cooldownMinutes', minutes, vscode.ConfigurationTarget.Global);
+      log(`Cooldown set to ${minutes} minute${minutes === 1 ? '' : 's'} per file.`);
+      vscode.window.showInformationMessage(`CodeLedger: Cooldown set to ${minutes} min per file.`);
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('codeledger.searchDecisions', async () => {
       if (!storage) {
         vscode.window.showInformationMessage('CodeLedger: No workspace open.');

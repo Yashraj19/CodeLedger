@@ -67,6 +67,11 @@
         "command": "codeledger.searchDecisions",
         "title": "Search Decisions",
         "category": "CodeLedger"
+      },
+      {
+        "command": "codeledger.setCooldown",
+        "title": "Set Cooldown",
+        "category": "CodeLedger"
       }
     ],
     "configuration": {

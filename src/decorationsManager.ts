@@ -46,8 +46,7 @@ export class DecorationsManager {
   private findLine(doc: vscode.TextDocument, codeSnippet: string): number | null {
     const candidates = codeSnippet
       .split('\n')
-      .filter(l => l.startsWith('+ '))
-      .map(l => l.slice(2).trim())
+      .map(l => l.trim())
       .filter(l => l.length > 3);
 
     if (candidates.length === 0) return null;

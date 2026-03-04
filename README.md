@@ -131,6 +131,10 @@ PRs and issues welcome. This is an early-stage project — feedback on what kind
 git clone https://github.com/Yashraj19/CodeLedger.git
 cd CodeLedger
 npm install
-npm run watch   # recompiles on file change
+npm run watch        # recompiles on file change
 # Press F5 in VS Code to launch the extension
+
+npm test             # run tests
+npm run test:watch   # run tests in watch mode
+npm run test:coverage  # run tests with coverage report
 ```

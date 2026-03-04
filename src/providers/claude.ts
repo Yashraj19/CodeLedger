@@ -5,6 +5,7 @@ import {
   parseResponse,
   fetchWithTimeout,
 } from './types';
+import { ClaudeResponse } from './apiTypes';
 
 const BASE_URL = 'https://api.anthropic.com/v1/messages';
 
@@ -41,7 +42,7 @@ export class ClaudeProvider implements LLMProvider {
       throw new Error(`Claude API error (${res.status}): ${err}`);
     }
 
-    const json: any = await res.json();
+    const json = await res.json() as ClaudeResponse;
     const text: string = json?.content?.[0]?.text ?? '';
     return parseResponse(text);
   }

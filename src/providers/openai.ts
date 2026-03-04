@@ -5,6 +5,7 @@ import {
   parseResponse,
   fetchWithTimeout,
 } from './types';
+import { OpenAIResponse } from './apiTypes';
 
 const BASE_URL = 'https://api.openai.com/v1/chat/completions';
 
@@ -41,7 +42,7 @@ export class OpenAIProvider implements LLMProvider {
       throw new Error(`OpenAI API error (${res.status}): ${err}`);
     }
 
-    const json: any = await res.json();
+    const json = await res.json() as OpenAIResponse;
     const text: string = json?.choices?.[0]?.message?.content ?? '';
     return parseResponse(text);
   }

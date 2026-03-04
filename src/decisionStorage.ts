@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs';
+import { toErrorMessage } from './utils';
 
 export interface Decision {
   id: string;
@@ -49,8 +50,8 @@ export class DecisionStorage {
             'Each `.json` file corresponds to a source file and contains questions and answers logged during development.',
           ].join('\n')
         );
-      } catch (err: any) {
-        throw new Error(`Failed to create .codeledger folder: ${err.message}`);
+      } catch (err: unknown) {
+        throw new Error(`Failed to create .codeledger folder: ${toErrorMessage(err)}`);
       }
     }
   }
@@ -69,6 +70,13 @@ export class DecisionStorage {
     answer: string,
     codeSnippet: string
   ): Decision {
+    if (!question.trim()) {
+      throw new Error('saveDecision: question must not be empty');
+    }
+    if (!answer.trim()) {
+      throw new Error('saveDecision: answer must not be empty');
+    }
+
     this.ensureStorageFolder();
 
     const storagePath = this.getStoragePath(filePath);
@@ -93,8 +101,8 @@ export class DecisionStorage {
 
     try {
       fs.writeFileSync(storagePath, JSON.stringify(decisionFile, null, 2));
-    } catch (err: any) {
-      throw new Error(`Failed to save decision: ${err.message}`);
+    } catch (err: unknown) {
+      throw new Error(`Failed to save decision: ${toErrorMessage(err)}`);
     }
 
     return decision;

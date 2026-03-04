@@ -41,6 +41,7 @@ export function activate(context: vscode.ExtensionContext) {
   let decorationsManager: DecorationsManager | null = null;
   const lastQuestionTimes = new Map<string, number>();
   let isAsking = false;
+  let pendingDocument: vscode.TextDocument | null = null;
   const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -187,7 +188,8 @@ export function activate(context: vscode.ExtensionContext) {
     log(`Processing: ${filename}`);
 
     if (isAsking) {
-      log('Skipped — already showing a question.');
+      log('Skipped — already showing a question (queued for after).');
+      pendingDocument = document;
       return;
     }
     if (!storage) {
@@ -270,6 +272,13 @@ export function activate(context: vscode.ExtensionContext) {
     } finally {
       isAsking = false;
       normalStatusBar();
+
+      // If changes arrived while we were asking, process them now
+      if (pendingDocument) {
+        const doc = pendingDocument;
+        pendingDocument = null;
+        scheduleProcessing(doc);
+      }
     }
   }
 

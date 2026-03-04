@@ -44,17 +44,20 @@ export class DecorationsManager {
   }
 
   private findLine(doc: vscode.TextDocument, codeSnippet: string): number | null {
+    // Sort longest-first: longer lines are more unique and less likely to false-match
     const candidates = codeSnippet
       .split('\n')
       .map(l => l.trim())
-      .filter(l => l.length > 3);
+      .filter(l => l.length > 10)
+      .sort((a, b) => b.length - a.length);
 
     if (candidates.length === 0) return null;
 
-    for (let i = 0; i < doc.lineCount; i++) {
-      const trimmed = doc.lineAt(i).text.trim();
-      if (candidates.some(c => trimmed === c)) {
-        return i;
+    for (const candidate of candidates) {
+      for (let i = 0; i < doc.lineCount; i++) {
+        if (doc.lineAt(i).text.trim() === candidate) {
+          return i;
+        }
       }
     }
     return null;

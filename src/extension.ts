@@ -39,7 +39,7 @@ export function activate(context: vscode.ExtensionContext) {
   let storage: DecisionStorage | null = null;
   let decisionsProvider: DecisionsProvider | null = null;
   let decorationsManager: DecorationsManager | null = null;
-  let lastQuestionTime = 0;
+  const lastQuestionTimes = new Map<string, number>();
   let isAsking = false;
   const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -126,6 +126,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidCloseTextDocument(doc => {
       const key = doc.uri.fsPath;
       diffTracker.clearFile(key);
+      lastQuestionTimes.delete(key);
       const timer = debounceTimers.get(key);
       if (timer) {
         clearTimeout(timer);
@@ -206,10 +207,11 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     const cooldownMs = cfg().get<number>('cooldownMinutes', 5) * 60 * 1000;
-    const msSinceLast = Date.now() - lastQuestionTime;
-    if (lastQuestionTime > 0 && msSinceLast < cooldownMs) {
+    const lastTime = lastQuestionTimes.get(document.fileName) ?? 0;
+    const msSinceLast = Date.now() - lastTime;
+    if (lastTime > 0 && msSinceLast < cooldownMs) {
       const remaining = Math.ceil((cooldownMs - msSinceLast) / 1000);
-      log(`Skipped — cooldown (${remaining}s remaining).`);
+      log(`Skipped — cooldown for this file (${remaining}s remaining).`);
       return;
     }
 
@@ -240,7 +242,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       log(`Question: ${question}`);
-      lastQuestionTime = Date.now();
+      lastQuestionTimes.set(document.fileName, Date.now());
 
       const snippet = diff.addedLines.slice(0, 20).join('\n');
       const answer = await QuestionPanel.ask(question, filename, snippet);

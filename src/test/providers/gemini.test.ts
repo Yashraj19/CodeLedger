@@ -41,15 +41,15 @@ describe('GeminiProvider', () => {
     await expect(provider.generateQuestion('foo.ts', '+ line')).rejects.toThrow('403');
   });
 
-  it('API key is in Authorization header, NOT in URL', async () => {
+  it('API key is in URL query param, not in Authorization header', async () => {
     const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
       makeResponse(geminiBody('SKIP'))
     );
     const provider = new GeminiProvider('my-secret-key');
     await provider.generateQuestion('foo.ts', '+ line');
     const [url, opts] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).not.toContain('my-secret-key');
+    expect(url).toContain('key=my-secret-key');
     const headers = opts.headers as Record<string, string>;
-    expect(headers['Authorization']).toBe('Bearer my-secret-key');
+    expect(headers['Authorization']).toBeUndefined();
   });
 });

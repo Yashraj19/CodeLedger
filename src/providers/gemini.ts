@@ -18,7 +18,7 @@ export class GeminiProvider implements LLMProvider {
   ) {}
 
   async generateQuestion(filename: string, diffText: string): Promise<string | null> {
-    const url = `${BASE_URL}/${this.model}:generateContent`;
+    const url = `${BASE_URL}/${this.model}:generateContent?key=${this.apiKey}`;
 
     const body = {
       system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
@@ -27,10 +27,7 @@ export class GeminiProvider implements LLMProvider {
 
     const res = await fetchWithTimeout(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
 

@@ -18,7 +18,7 @@ const WATCHED_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
   '.py', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.hpp',
   '.cs', '.rb', '.php', '.swift', '.kt', '.scala',
-  '.vue', '.svelte',
+  '.vue', '.svelte', '.html',
   '.css', '.scss', '.less',
   '.sql', '.sh', '.bash', '.zsh',
   '.yaml', '.yml', '.toml',
